@@ -1,0 +1,741 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+plot(cars)
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
+
+
+```{r}
+# Formatting/preparing data for Kaplan-Meier survival analysis  
+
+#Loading in relevant libraries 
+
+library(survival)
+library(lubridate)
+library(ggsurvfit)
+library(dplyr)
+library(GGally)
+
+
+Comfort_Q10 <- read.csv("final.preprocessed_df_forKM.csv") #reading in relevant file from preprocessing 
+
+Comfort_Q10 <- filter(Comfort_Q10, Date.of.Implant !="") #removing patients who have a missing date of implant 
+
+# Filtering to obtain only relevant columns for kaplan-meier curves (single and multiple curves)  
+Comfort_Q11 <- Comfort_Q10[ , which(names(Comfort_Q10) %in% c("Date.of.Implant","Date.of.Death","Charlson.None","Charlson.Mild", "Charlson.Moderate","Charlson.Severe","Pre.Frail","Not.Frail","Frail","Death..1.yes..0.no.","Date.of.Follow.Up"))]
+
+Comfort_Q11 %>% count(Death..1.yes..0.no.) # all cleaned 
+
+# Cleaning Date.of.Implant
+
+Comfort_Q11$Date.of.Implant[Comfort_Q11$Date.of.Implant == "29/11/2107"] <- "29/11/2017"
+
+Comfort_Q11$Date.of.Implant[Comfort_Q11$Date.of.Implant == "24/04/3017"] <- "24/04/2017"
+
+Comfort_Q11$Date.of.Implant[Comfort_Q11$Date.of.Implant == "12/-9/2017"] <- "12/09/2017"
+
+#Reformatting date of death and date of follow up so can combine columns to get a single date (death or date of follow up) 
+
+Comfort_Q11$Date.of.Death[is.na(Comfort_Q11$Date.of.Death)] <- "" # blank space so single date when combine columns 
+
+Comfort_Q11$Date.of.Death[Comfort_Q11$Date.of.Death == "No"] <- "" # blank space so single date when combine columns 
+
+Comfort_Q11$Date.of.Follow.Up[Comfort_Q11$Date.of.Follow.Up == "na"] <- "" # assuming this means not applicable rather than not available
+
+Comfort_Q12 <- Comfort_Q11 # saving to new variable 
+
+# for and if loop so that if a date of death is given, the (booked in/ planned/future) follow up date isn't given, to avoid a double date figure when combine columns 
+
+for (i in 1:659){
+  if (Comfort_Q12[i,10] != ""){
+  Comfort_Q12[i,9] <- ""}
+}
+
+
+Outcome <-paste(Comfort_Q12$Date.of.Death,Comfort_Q12$Date.of.Follow.Up) #combing column responses
+
+Outcome <- as.data.frame(Outcome) #converting to a dataframe so can add back to original dataframe
+
+Comfort_Q12 <- cbind(Comfort_Q12, Outcome) #combining dataframes 
+
+Comfort_Q12 <- Comfort_Q12[,-which(names(Comfort_Q12) %in% c("Date.of.Death","Date.of.Follow.Up"))] # removing now redundant date of death and date of follow up columns 
+
+# Cleaning Outcome column
+
+Comfort_Q12 %>% count(Outcome)
+
+Comfort_Q12$Outcome[Comfort_Q12$Outcome == " #REF!"] <- NA # implies missing 
+
+
+Comfort_Q12$Outcome[Comfort_Q12$Outcome == " 29/02/2020 and 09/04/2020"] <- "09/04/2020" #going to take 2nd follow up date as offers more information (in terms of time to (or not to) event)
+
+
+Comfort_Q12$Outcome[Comfort_Q12$Outcome == " 01/04/2020 and 09/04/2020."] <- "09/04/2020" #going to take 2nd follow up date as offers more information (in terms of time to (or not to) event)
+
+Comfort_Q12$Outcome[Comfort_Q12$Outcome == "14/11/2029 "] <- "14/11/2019" # typo - most likely date
+
+Comfort_Q12 %>% count(Outcome)
+
+```
+
+
+```{r}
+# Implementing kaplan meier survival analysis on whole data frame 
+
+Comfort_Q13 <- Comfort_Q12[,which(names(Comfort_Q12) %in% c("Date.of.Implant","Death..1.yes..0.no.","Outcome"))]  # removing charlson and fried score information 
+
+names(Comfort_Q13)[3] <- "FollowUp.Or.Death" # so to avoid confusion with outcome dataframe created 
+
+
+Comfort_Q14 <- tibble(
+  s_date <- c(Comfort_Q13$Date.of.Implant),
+  last_fup_date <-(Comfort_Q13$FollowUp.Or.Death) # creating a tibble
+)
+
+# Renaming columns 
+
+names(Comfort_Q14)[1] <- "Date.of.Implant"
+names(Comfort_Q14)[2] <- "FollowUp.Or.Death"
+
+class(Comfort_Q14$Date.of.Implant) # character class  
+
+# Converting date information from dd/mm/yyyy to yyyy-mm-dd (so can implement ymd function)
+
+Comfort_Q14$FollowUp.Or.Death <- strptime(Comfort_Q14$FollowUp.Or.Death,"%d/%m/%Y")
+Comfort_Q14$Date.of.Implant <- strptime(Comfort_Q14$Date.of.Implant,"%d/%m/%Y")
+
+# Converting from character class to date class 
+
+Comfort_Q14<-Comfort_Q14 %>%mutate(
+     Date.of.Implant = ymd(Date.of.Implant),
+    FollowUp.Or.Death = ymd(FollowUp.Or.Death)
+    )
+
+Comfort_Q14
+
+class(Comfort_Q14$Date.of.Implant) # date class 
+
+# Working out duration in years between date of implant and follow up/death 
+
+Comfort_Q14 <-
+  Comfort_Q14 %>% 
+  mutate(
+    os_yrs = as.duration( Date.of.Implant%--% FollowUp.Or.Death) / dyears(1)
+    )
+
+Comfort_Q14 <- as.data.frame(Comfort_Q14) # converting to a dataframe 
+
+Comfort_Q15 <- cbind(Comfort_Q13[2],Comfort_Q14[3]) #dataframe consistency of duration info and whether died or not 
+              
+```
+
+
+```{r}
+#Kaplan-Meier curve plot for everyone  
+
+Surv(Comfort_Q15$os_yrs, Comfort_Q15$Death..1.yes..0.no.)[1:50] # + values indicate that the patient was censored (didn't die during the follow up period) 
+
+s1 <- survfit(Surv(os_yrs,Death..1.yes..0.no. ) ~ 1, data = Comfort_Q15) # creating survival curve 
+
+s1$surv # to obtain survival estimates at different times 
+sum(s1$n.event) # to obtain total number of events (death)
+
+# so can view estimated overall survival probability at different times  
+
+time_s1 <- as.data.frame(s1$time) # converting to dataframe 
+surv_s1 <- as.data.frame(s1$surv) # converting to dataframe 
+time_surv_s1 <- cbind(surv_s1, time_s1) # combining dataframes 
+View(time_surv_s1)
+
+# Longest duration between date of implant and follow up/death 
+
+years<- as.numeric(Comfort_Q15$os_yrs) #converting years info to numeric 
+
+years <- as.data.frame(years)
+
+max(years,na.rm = TRUE) # 4.684463 years. na.rm -> na values are stripped before computation proceeds 
+
+# Average and longest duration between date of implant and follow up (for patients who didn't die)
+
+Follow_period <- filter(Comfort_Q15,Death..1.yes..0.no. == 0 ) # extracting patients who didn't die in the study 
+
+mean(Follow_period$os_yrs, na.rm = TRUE) # 2.576318 years. na.rm -> na values are stripped before computation proceeds 
+
+max(Follow_period$os_yrs,na.rm = TRUE) # 4.684463 years (same as above). na.rm -> na values are stripped before computation proceeds 
+
+# Extent of missing values for years and death 
+
+sum(is.na(Comfort_Q15$Death..1.yes..0.no.)) # 0 missing values (as expected from cleaning)
+
+sum(is.na(Comfort_Q15$os_yrs)) # 30 missing values 
+
+#plotting survival curve
+
+survfit2(Surv(os_yrs,Death..1.yes..0.no.) ~ 1, data = Comfort_Q15) %>% 
+  ggsurvfit() +
+  labs(
+    x = "Years",
+    y = "Overall survival probability"
+  ) +
+  add_risktable() # risk table to see number of events
+
+```
+
+```{r}
+# Implementing kaplan meier survival analysis on Frail patients 
+
+Comfort_Q13 <- filter(Comfort_Q12, Frail == "1") #filtering to obtain only frail patients 
+
+Comfort_Q13 <- Comfort_Q13[,which(names(Comfort_Q12) %in% c("Date.of.Implant","Death..1.yes..0.no.","Outcome"))]  # removing now redundant charlson and fried score information 
+
+names(Comfort_Q13)[3] <- "FollowUp.Or.Death" # so to avoid confusion with outcome dataframe created 
+
+
+Comfort_Q14 <- tibble(
+  s_date <- c(Comfort_Q13$Date.of.Implant),
+  last_fup_date <-(Comfort_Q13$FollowUp.Or.Death) # creating a tibble
+)
+
+
+Comfort_Q14
+
+#Renaming columns 
+
+names(Comfort_Q14)[1] <- "Date.of.Implant"
+names(Comfort_Q14)[2] <- "FollowUp.Or.Death"
+
+class(Comfort_Q14$Date.of.Implant) # character class  
+
+# Converting date information from dd/mm/yyyy to yyyy-mm-dd (so can implement ymd function)
+
+Comfort_Q14$FollowUp.Or.Death <- strptime(Comfort_Q14$FollowUp.Or.Death,"%d/%m/%Y")
+Comfort_Q14$Date.of.Implant <- strptime(Comfort_Q14$Date.of.Implant,"%d/%m/%Y")
+
+# Converting from character class to date class
+
+Comfort_Q14<-Comfort_Q14 %>%mutate(
+     Date.of.Implant = ymd(Date.of.Implant),
+    FollowUp.Or.Death = ymd(FollowUp.Or.Death)
+    )
+
+Comfort_Q14
+
+class(Comfort_Q14$Date.of.Implant) # date class 
+
+# Working out duration in years between date of implant and follow up/death 
+
+Comfort_Q14 <-
+  Comfort_Q14 %>% 
+  mutate(
+    os_yrs = as.duration( Date.of.Implant%--% FollowUp.Or.Death) / dyears(1)
+    )
+
+Comfort_Q14 <- as.data.frame(Comfort_Q14) # converting to a dataframe 
+
+Comfort_Q15 <- cbind(Comfort_Q13[2],Comfort_Q14[3]) #dataframe consisting of duration info and whether died or not
+
+sum(is.na(Comfort_Q15$os_yrs)) # 4 missing values 
+
+Frail <- Comfort_Q15 # saving for multi curve plot 
+
+s1 <- survfit(Surv(os_yrs,Death..1.yes..0.no. ) ~ 1, data = Comfort_Q15) # creating survival curve 
+
+s1$surv # to obtain survival estimates at different times 
+sum(s1$n.event) # to obtain total number of events (death) (n = 25)
+
+# so can view estimated overall survival probability at different times  
+
+time_s1 <- as.data.frame(s1$time) # converting to dataframe 
+surv_s1 <- as.data.frame(s1$surv) # converting to dataframe 
+time_surv_s1 <- cbind(surv_s1, time_s1) # combining dataframes 
+View(time_surv_s1)
+
+```
+
+
+```{r}
+ # Implementing kaplan meier survival analysis on Pre.Frail patients 
+
+Comfort_Q13 <- filter(Comfort_Q12, Pre.Frail == "1") #filtering to obtain only frail patients 
+
+Comfort_Q13 <- Comfort_Q13[,which(names(Comfort_Q12) %in% c("Date.of.Implant","Death..1.yes..0.no.","Outcome"))]  # removing now redundant charlson and fried score information 
+
+names(Comfort_Q13)[3] <- "FollowUp.Or.Death" # so to avoid confusion with outcome dataframe created 
+
+
+Comfort_Q14 <- tibble(
+  s_date <- c(Comfort_Q13$Date.of.Implant),
+  last_fup_date <-(Comfort_Q13$FollowUp.Or.Death) # creating a tibble
+)
+
+
+Comfort_Q14
+
+#Renaming columns 
+
+names(Comfort_Q14)[1] <- "Date.of.Implant"
+names(Comfort_Q14)[2] <- "FollowUp.Or.Death"
+
+class(Comfort_Q14$Date.of.Implant) # character class  
+
+# Converting date information from dd/mm/yyyy to yyyy-mm-dd (so can implement ymd function)
+
+Comfort_Q14$FollowUp.Or.Death <- strptime(Comfort_Q14$FollowUp.Or.Death,"%d/%m/%Y")
+Comfort_Q14$Date.of.Implant <- strptime(Comfort_Q14$Date.of.Implant,"%d/%m/%Y")
+
+# Converting from class character to class date
+
+Comfort_Q14<-Comfort_Q14 %>%mutate(
+     Date.of.Implant = ymd(Date.of.Implant),
+    FollowUp.Or.Death = ymd(FollowUp.Or.Death)
+    )
+
+Comfort_Q14
+
+class(Comfort_Q14$Date.of.Implant) # date class 
+
+# Working out duration in years between date of implant and follow up/death 
+
+Comfort_Q14 <-
+  Comfort_Q14 %>% 
+  mutate(
+    os_yrs = as.duration( Date.of.Implant%--% FollowUp.Or.Death) / dyears(1)
+    )
+
+Comfort_Q14 <- as.data.frame(Comfort_Q14) # converting to a dataframe 
+
+Comfort_Q15 <- cbind(Comfort_Q13[2],Comfort_Q14[3]) #dataframe consisting of duration info and whether died or not 
+
+sum(is.na(Comfort_Q15$os_yrs)) # 12 missing values 
+
+PreFrail <- Comfort_Q15 # saving for multi curve plot 
+
+s1 <- survfit(Surv(os_yrs,Death..1.yes..0.no. ) ~ 1, data = Comfort_Q15) # creating survival curve 
+
+s1$surv # to obtain survival estimates at different times 
+sum(s1$n.event) # to obtain total number of events (death) (n = 21)
+
+# so can view estimated overall survival probability at different times  
+
+time_s1 <- as.data.frame(s1$time) # converting to dataframe 
+surv_s1 <- as.data.frame(s1$surv) # converting to dataframe 
+time_surv_s1 <- cbind(surv_s1, time_s1) # combining dataframes 
+View(time_surv_s1)
+
+```
+
+```{r}
+# Implementing kaplan meier survival analysis on Not.Frail patients 
+
+Comfort_Q13 <- filter(Comfort_Q12, Not.Frail == "1") #filtering to obtain only frail patients 
+
+Comfort_Q13 <- Comfort_Q13[,which(names(Comfort_Q12) %in% c("Date.of.Implant","Death..1.yes..0.no.","Outcome"))]  # removing now redundant charlson and fried score information 
+
+names(Comfort_Q13)[3] <- "FollowUp.Or.Death" # so to avoid confusion with outcome dataframe created 
+
+
+Comfort_Q14 <- tibble(
+  s_date <- c(Comfort_Q13$Date.of.Implant),
+  last_fup_date <-(Comfort_Q13$FollowUp.Or.Death) # creating a tibble
+)
+
+
+Comfort_Q14
+
+#Renaming columns 
+
+names(Comfort_Q14)[1] <- "Date.of.Implant"
+names(Comfort_Q14)[2] <- "FollowUp.Or.Death"
+
+class(Comfort_Q14$Date.of.Implant) # character class  
+
+# Converting date information from dd/mm/yyyy to yyyy-mm-dd (so can implement ymd function)
+
+Comfort_Q14$FollowUp.Or.Death <- strptime(Comfort_Q14$FollowUp.Or.Death,"%d/%m/%Y")
+Comfort_Q14$Date.of.Implant <- strptime(Comfort_Q14$Date.of.Implant,"%d/%m/%Y")
+
+# Converting from class character to class date
+
+Comfort_Q14<-Comfort_Q14 %>%mutate(
+     Date.of.Implant = ymd(Date.of.Implant),
+    FollowUp.Or.Death = ymd(FollowUp.Or.Death)
+    )
+
+Comfort_Q14
+
+class(Comfort_Q14$Date.of.Implant) # date class 
+
+# Working out duration in years between date of implant and follow up/death 
+
+Comfort_Q14 <-
+  Comfort_Q14 %>% 
+  mutate(
+    os_yrs = as.duration( Date.of.Implant%--% FollowUp.Or.Death) / dyears(1)
+    )
+
+Comfort_Q14 <- as.data.frame(Comfort_Q14) # converting to a dataframe 
+
+Comfort_Q15 <- cbind(Comfort_Q13[2],Comfort_Q14[3]) #dataframe consisting of duration info and whether died or not 
+
+sum(is.na(Comfort_Q15$os_yrs)) # 14 missing values 
+
+NotFrail <- Comfort_Q15 # saving for multi curve plot 
+
+s1 <- survfit(Surv(os_yrs,Death..1.yes..0.no. ) ~ 1, data = Comfort_Q15) # creating survival curve 
+
+s1$surv # to obtain survival estimates at different times 
+sum(s1$n.event) # to obtain total number of events (death) (n = 17)
+
+# so can view estimated overall survival probability at different times  
+
+time_s1 <- as.data.frame(s1$time) # converting to dataframe 
+surv_s1 <- as.data.frame(s1$surv) # converting to dataframe 
+time_surv_s1 <- cbind(surv_s1, time_s1) # combining dataframes 
+View(time_surv_s1)
+
+```
+
+```{r}
+# Multiple Kaplan Meier curve plot for different levels of frailty
+
+# Recombining frailty categories and adding adding column for distinguishing between them
+
+
+Fried_score <- rbind((cbind(Frail, type = 'Frail')),
+                  (cbind(PreFrail, type = 'Pre.Frail')),
+                  (cbind(NotFrail, type = "Not.Frail"))) 
+
+
+sf.Fried <- survfit(Surv(os_yrs,Death..1.yes..0.no.) ~ type, data = Fried_score) #creating survival curve 
+
+#plotting survival curve 
+
+ggsurv(sf.Fried) + labs(
+    x = "Years",
+    y = "Overall survival probability"
+  )
+
+
+
+```
+
+
+```{r}
+# Implementing kaplan meier survival analysis on Charlson.None patients 
+
+Comfort_Q13 <- filter(Comfort_Q12, Charlson.None == "1") # filtering to obtain only patients with no comorbidities
+
+Comfort_Q13 <- Comfort_Q13[,which(names(Comfort_Q12) %in% c("Date.of.Implant","Death..1.yes..0.no.","Outcome"))]  # removing now redundant charlson and fried score information 
+
+names(Comfort_Q13)[3] <- "FollowUp.Or.Death" # so to avoid confusion with outcome dataframe created 
+
+
+Comfort_Q14 <- tibble(
+  s_date <- c(Comfort_Q13$Date.of.Implant),
+  last_fup_date <-(Comfort_Q13$FollowUp.Or.Death) # creating a tibble
+)
+
+
+Comfort_Q14
+
+#Renaming columns 
+
+names(Comfort_Q14)[1] <- "Date.of.Implant"
+names(Comfort_Q14)[2] <- "FollowUp.Or.Death"
+
+class(Comfort_Q14$Date.of.Implant) # character class  
+
+# Converting date information from dd/mm/yyyy to yyyy-mm-dd (so can implement ymd function)
+
+Comfort_Q14$FollowUp.Or.Death <- strptime(Comfort_Q14$FollowUp.Or.Death,"%d/%m/%Y")
+Comfort_Q14$Date.of.Implant <- strptime(Comfort_Q14$Date.of.Implant,"%d/%m/%Y")
+
+# Converting from class character to class date
+
+Comfort_Q14<-Comfort_Q14 %>%mutate(
+     Date.of.Implant = ymd(Date.of.Implant),
+    FollowUp.Or.Death = ymd(FollowUp.Or.Death)
+    )
+
+Comfort_Q14
+
+class(Comfort_Q14$Date.of.Implant) # date class 
+
+# Working out duration in years between date of implant and follow up/death 
+
+Comfort_Q14 <-
+  Comfort_Q14 %>% 
+  mutate(
+    os_yrs = as.duration( Date.of.Implant%--% FollowUp.Or.Death) / dyears(1)
+    )
+
+Comfort_Q14 <- as.data.frame(Comfort_Q14) # converting to a dataframe 
+
+Comfort_Q15 <- cbind(Comfort_Q13[2],Comfort_Q14[3]) #dataframe consisting of duration info and whether died or not 
+
+sum(is.na(Comfort_Q15$os_yrs)) # 5 missing values 
+
+CharlsonNone <- Comfort_Q15 # saving for multi curve plot 
+
+s1 <- survfit(Surv(os_yrs,Death..1.yes..0.no. ) ~ 1, data = Comfort_Q15) # creating survival curve 
+
+s1$surv # to obtain survival estimates at different times 
+sum(s1$n.event) # to obtain total number of events (death) (n = 4)
+
+# so can view estimated overall survival probability at different times  
+
+time_s1 <- as.data.frame(s1$time) # converting to dataframe 
+surv_s1 <- as.data.frame(s1$surv) # converting to dataframe 
+time_surv_s1 <- cbind(surv_s1, time_s1) # combining dataframes 
+View(time_surv_s1)
+
+```
+
+```{r}
+# Implementing kaplan meier survival analysis on Charlson.Mild patients 
+
+Comfort_Q13 <- filter(Comfort_Q12, Charlson.Mild == "1") #filtering to obtain only patients with mild comorbidities  
+
+Comfort_Q13 <- Comfort_Q13[,which(names(Comfort_Q12) %in% c("Date.of.Implant","Death..1.yes..0.no.","Outcome"))]  # removing now redundant charlson and fried score information 
+
+names(Comfort_Q13)[3] <- "FollowUp.Or.Death" # so to avoid confusion with outcome dataframe created 
+
+
+Comfort_Q14 <- tibble(
+  s_date <- c(Comfort_Q13$Date.of.Implant),
+  last_fup_date <-(Comfort_Q13$FollowUp.Or.Death) # creating a tibble
+)
+
+
+Comfort_Q14
+
+#Renaming columns 
+
+names(Comfort_Q14)[1] <- "Date.of.Implant"
+names(Comfort_Q14)[2] <- "FollowUp.Or.Death"
+
+class(Comfort_Q14$Date.of.Implant) # character class  
+
+# Converting date information from dd/mm/yyyy to yyyy-mm-dd (so can implement ymd function)
+
+Comfort_Q14$FollowUp.Or.Death <- strptime(Comfort_Q14$FollowUp.Or.Death,"%d/%m/%Y")
+Comfort_Q14$Date.of.Implant <- strptime(Comfort_Q14$Date.of.Implant,"%d/%m/%Y")
+
+# Converting from class character to class date
+
+Comfort_Q14<-Comfort_Q14 %>%mutate(
+     Date.of.Implant = ymd(Date.of.Implant),
+    FollowUp.Or.Death = ymd(FollowUp.Or.Death)
+    )
+
+Comfort_Q14
+
+class(Comfort_Q14$Date.of.Implant) # date class 
+
+# Working out duration in years between date of implant and follow up/death 
+
+Comfort_Q14 <-
+  Comfort_Q14 %>% 
+  mutate(
+    os_yrs = as.duration( Date.of.Implant%--% FollowUp.Or.Death) / dyears(1)
+    )
+
+Comfort_Q14 <- as.data.frame(Comfort_Q14) # converting to a dataframe 
+
+Comfort_Q15 <- cbind(Comfort_Q13[2],Comfort_Q14[3]) #dataframe consistomg of duration info and whether died or not 
+
+sum(is.na(Comfort_Q15$os_yrs)) # 22 missing values 
+
+CharlsonMild <- Comfort_Q15 # saving for multi curve plot 
+
+s1 <- survfit(Surv(os_yrs,Death..1.yes..0.no. ) ~ 1, data = Comfort_Q15) # creating survival curve 
+
+s1$surv # to obtain survival estimates at different times 
+sum(s1$n.event) # to obtain total number of events (death) (n = 26)
+
+# so can view estimated overall survival probability at different times  
+
+time_s1 <- as.data.frame(s1$time) # converting to dataframe 
+surv_s1 <- as.data.frame(s1$surv) # converting to dataframe 
+time_surv_s1 <- cbind(surv_s1, time_s1) # combining dataframes 
+View(time_surv_s1)
+```
+
+```{r}
+# Implementing kaplan meier survival analysis on Charlson.Moderate patients 
+
+Comfort_Q13 <- filter(Comfort_Q12, Charlson.Moderate == "1") #filtering to obtain only patients with moderate comorbidities  
+
+Comfort_Q13 <- Comfort_Q13[,which(names(Comfort_Q12) %in% c("Date.of.Implant","Death..1.yes..0.no.","Outcome"))]  # removing now redundant charlson and fried score information 
+
+names(Comfort_Q13)[3] <- "FollowUp.Or.Death" # so to avoid confusion with outcome dataframe created 
+
+
+Comfort_Q14 <- tibble(
+  s_date <- c(Comfort_Q13$Date.of.Implant),
+  last_fup_date <-(Comfort_Q13$FollowUp.Or.Death) # creating a tibble
+)
+
+
+Comfort_Q14
+
+#Renaming columns 
+
+names(Comfort_Q14)[1] <- "Date.of.Implant"
+names(Comfort_Q14)[2] <- "FollowUp.Or.Death"
+
+class(Comfort_Q14$Date.of.Implant) # character class  
+
+# Converting date information from dd/mm/yyyy to yyyy-mm-dd (so can implement ymd function)
+
+Comfort_Q14$FollowUp.Or.Death <- strptime(Comfort_Q14$FollowUp.Or.Death,"%d/%m/%Y")
+Comfort_Q14$Date.of.Implant <- strptime(Comfort_Q14$Date.of.Implant,"%d/%m/%Y")
+
+# Converting from class character to class date
+
+Comfort_Q14<-Comfort_Q14 %>%mutate(
+     Date.of.Implant = ymd(Date.of.Implant),
+    FollowUp.Or.Death = ymd(FollowUp.Or.Death)
+    )
+
+Comfort_Q14
+
+class(Comfort_Q14$Date.of.Implant) # date class 
+
+# Working out duration in years between date of implant and follow up/death 
+
+Comfort_Q14 <-
+  Comfort_Q14 %>% 
+  mutate(
+    os_yrs = as.duration( Date.of.Implant%--% FollowUp.Or.Death) / dyears(1)
+    )
+
+Comfort_Q14 <- as.data.frame(Comfort_Q14) # converting to a dataframe 
+
+Comfort_Q15 <- cbind(Comfort_Q13[2],Comfort_Q14[3]) #dataframe consisting of duration info and whether died or not 
+
+sum(is.na(Comfort_Q15$os_yrs)) # 2 missing values 
+
+CharlsonModerate <- Comfort_Q15 # saving for multi curve plot 
+
+s1 <- survfit(Surv(os_yrs,Death..1.yes..0.no. ) ~ 1, data = Comfort_Q15) # creating survival curve 
+
+s1$surv # to obtain survival estimates at different times 
+sum(s1$n.event) # to obtain total number of events (death) (n = 15)
+
+# so can view estimated overall survival probability at different times  
+
+time_s1 <- as.data.frame(s1$time) # converting to dataframe 
+surv_s1 <- as.data.frame(s1$surv) # converting to dataframe 
+time_surv_s1 <- cbind(surv_s1, time_s1) # combining dataframes 
+View(time_surv_s1)
+```
+
+```{r}
+# Implementing kaplan meier survival analysis on Charlson.Severe patients
+
+Comfort_Q13 <- filter(Comfort_Q12, Charlson.Severe == "1") #filtering to obtain only patients with no comorbidities  
+
+Comfort_Q13 <- Comfort_Q13[,which(names(Comfort_Q12) %in% c("Date.of.Implant","Death..1.yes..0.no.","Outcome"))]  # removing now redundant charlson and fried score information 
+
+names(Comfort_Q13)[3] <- "FollowUp.Or.Death" # so to avoid confusion with outcome dataframe created 
+
+
+Comfort_Q14 <- tibble(
+  s_date <- c(Comfort_Q13$Date.of.Implant),
+  last_fup_date <-(Comfort_Q13$FollowUp.Or.Death) # creating a tibble
+)
+
+
+Comfort_Q14
+
+#Renaming columns 
+
+names(Comfort_Q14)[1] <- "Date.of.Implant"
+names(Comfort_Q14)[2] <- "FollowUp.Or.Death"
+
+class(Comfort_Q14$Date.of.Implant) # character class  
+
+# Converting date information from dd/mm/yyyy to yyyy-mm-dd (so can implement ymd function)
+
+Comfort_Q14$FollowUp.Or.Death <- strptime(Comfort_Q14$FollowUp.Or.Death,"%d/%m/%Y")
+Comfort_Q14$Date.of.Implant <- strptime(Comfort_Q14$Date.of.Implant,"%d/%m/%Y")
+
+# Converting from class character to class date
+
+Comfort_Q14<-Comfort_Q14 %>%mutate(
+     Date.of.Implant = ymd(Date.of.Implant),
+    FollowUp.Or.Death = ymd(FollowUp.Or.Death)
+    )
+
+Comfort_Q14
+
+class(Comfort_Q14$Date.of.Implant) # date class 
+
+# Working out duration in years between date of implant and follow up/death 
+
+Comfort_Q14 <-
+  Comfort_Q14 %>% 
+  mutate(
+    os_yrs = as.duration( Date.of.Implant%--% FollowUp.Or.Death) / dyears(1)
+    )
+
+Comfort_Q14 <- as.data.frame(Comfort_Q14) # converting to a dataframe 
+
+Comfort_Q15 <- cbind(Comfort_Q13[2],Comfort_Q14[3]) #dataframe consisting of duration info and whether died or not 
+
+sum(is.na(Comfort_Q15$os_yrs)) # 1 missing values 
+
+CharlsonSevere <- Comfort_Q15 # saving for multi curve plot 
+
+s1 <- survfit(Surv(os_yrs,Death..1.yes..0.no. ) ~ 1, data = Comfort_Q15) # creating survival curve 
+
+s1$surv # to obtain survival estimates at different times 
+sum(s1$n.event) # to obtain total number of events (death) (n = 18)
+
+# so can view estimated overall survival probability at different times  
+
+time_s1 <- as.data.frame(s1$time) # converting to dataframe 
+surv_s1 <- as.data.frame(s1$surv) # converting to dataframe 
+time_surv_s1 <- cbind(surv_s1, time_s1) # combining dataframes 
+View(time_surv_s1)
+```
+
+
+```{r}
+# Multiple Kaplan Meier curve plot for different comorbidity categories 
+
+# Recombining categories and adding adding column for distinguishing between them
+
+Charlson_score<- rbind((cbind(CharlsonNone, type = 'None')),
+                  (cbind(CharlsonMild, type = 'Mild')),
+                  (cbind(CharlsonModerate, type = 'Moderate')),(cbind(CharlsonSevere, type ="Severe")))
+
+
+sf.Charlson <- survfit(Surv(os_yrs,Death..1.yes..0.no.) ~ type, data = Charlson_score) #creating survival curve 
+
+#plotting survival curve 
+
+ggsurv(sf.Charlson) + labs(
+    x = "Years",
+    y = "Overall survival probability"
+  ) 
+```
+
+
+
+
