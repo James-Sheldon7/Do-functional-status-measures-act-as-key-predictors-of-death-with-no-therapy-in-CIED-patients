@@ -1,0 +1,358 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+plot(cars)
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
+```{r}
+# Preparing data frame for multivariate logistic regression 
+
+rm(list=ls()) #clearing environment 
+
+# Loading in relevant libraries 
+
+library(caret) 
+library(dplyr)
+library(tidyverse)
+library(smotefamily)
+library(broom)
+library(MASS)
+library(ROCR)
+library(PRROC)
+library(ggcorrplot)
+source("http://www.sthda.com/upload/rquery_cormat.r")
+library(ggplot2)
+
+Comfort_Q18 <- read.csv("processed_df_11.11.csv") #loading in preprocessed data frame
+
+Comfort_Q20<- Comfort_Q18[-c(1)] # removing x column, byproduct of loading in csv file 
+
+Comfort_Q20 %>% count(Age.70.1) # > 70 (for model)
+Comfort_Q20 %>% count(Age.70) # < 70 
+Comfort_Q20 %>% count(eGFR.60) # < 60 (for model)
+Comfort_Q20 %>% count(eGFR.60.1) # > 60
+Comfort_Q20 %>% count(EQ5D5L.0.6) # < 0.6 (for model)
+
+# Filtering to obtain dataframe with only dichotomous variables 
+
+Comfort_Q20<- Comfort_Q20[ , which(names(Comfort_Q20) %in% c("Age.70.1", "eGFR.60", "EQ5D5L.0.6", "Frail", "Charlson.Severe","Outcome_variable"))]
+
+# Sanity check for multicollinearity
+
+Correlation_everything <- Comfort_Q20[ , -which(names(Comfort_Q20) %in% c("Outcome_variable"))] #to get rid of outcome variable
+
+# Correlation plot of everything
+
+model.matrix(~0+., data = Correlation_everything) %>%
+cor(use="pairwise.complete.obs") %>%
+ggcorrplot(show.diag = F, type="lower", lab=TRUE, lab_size=5,  tl.cex = 5) # no correlations greater than (+/-) 0.7 justifying removal 
+
+```
+
+
+```{r}
+# Splitting into train and test splits (50:50)
+
+set.seed(944935481) #reproducibility
+
+trainIndex <- createDataPartition(Comfort_Q20$Outcome_variable, p = .5, 
+                                  list = FALSE, 
+                                  times = 1) #creating test and training partitions 
+head(trainIndex)
+
+Train <- Comfort_Q20[ trainIndex,] #obtaining training set 
+Test  <- Comfort_Q20[-trainIndex,] #obtaining test set  
+
+print(table(Test$Outcome_variable)) #checking appropriate splitting of outcome variable n=26 
+print(table(Train$Outcome_variable)) #n = 28
+```
+
+
+```{r}
+# SMOTE implementation 
+
+DATA <-SMOTE(Train, Train$Outcome_variable, K=5, dup_size = 10) #implementing SMOTE. 5 nearest neighbours during sampling process. Duplicating the number of minority instances (death with no appropriate therapy) 10 times. Therefore, minority class is 11x bigger in absolute terms  
+
+Comfort_Q12 <- DATA$data #extracting SMOTE dataset
+
+print(prop.table(table(Comfort_Q12$Outcome_variable))) # proportions in outcome variable following SMOTE 
+
+print(table(Comfort_Q12$Outcome_variable)) # 303(0):308(1) -> ~ equal proportions in outcome variable 
+
+Comfort_Q12 <-Comfort_Q12[ , -which(names(Comfort_Q12) %in% c("class"))] # removing class column (matches up perfectly with outcome variable column) - byproduct of SMOTE
+
+
+# Reformatting binary variables to factors where appropriate 
+
+Comfort_Q12$Frail <- (ifelse(Comfort_Q12$Frail<0.5,0,1))
+Comfort_Q12$Charlson.Severe <- (ifelse(Comfort_Q12$Charlson.Severe<0.5,0,1))
+Comfort_Q12$Age.70.1 <- (ifelse(Comfort_Q12$Age.70.1<0.5,0,1))
+Comfort_Q12$EQ5D5L.0.6 <- (ifelse(Comfort_Q12$EQ5D5L.0.6 <0.5,0,1))
+Comfort_Q12$eGFR.60 <- (ifelse(Comfort_Q12$eGFR.60 <0.5,0,1))
+
+Train <- Comfort_Q12 # saving to new variable
+
+Train$Outcome_variable <-as.factor(Train$Outcome_variable) #converting outcome column to factor 
+
+```
+
+```{r}
+
+# Multivariate logistic regression with all variables 
+
+k <- 10 #number of iterations 
+
+acc <- NULL # for storing accuracy from each iteration of cross-validation
+
+performances <- c() # for storing RMSE values from each iteration of                                                   cross-validation 
+
+# Fitting multivariate logistic regression model with repeated stratified cross validation
+
+set.seed(8699297)
+
+for(i in 1:k)
+{
+# splitting of train data into 90% train, 10% validation 
+trainIndex <- createDataPartition(Train$Outcome_variable, p = 0.9,
+                                 list = FALSE,
+                                 times = 1)
+train <- Train[trainIndex, ] # train split
+validation <- Train[-trainIndex, ] # validation split
+
+# Fitting the model 
+model_x <- glm(Outcome_variable ~ ., data = train, family = binomial(link='logit')) 
+
+# Predicting results in validation split
+options(warn=-1) #getting rid of checked warning messages
+probabilities <- model_x %>% predict(validation, type = "response") # obtaining predicted probabilities
+
+#predict the class of individuals based on their predicted probabilities 
+results <- ifelse(probabilities > 0.5,1,0)
+
+# Actual class 
+answers <- validation$Outcome_variable
+
+# Calculation of accuracy
+misClasificError <- mean(answers != results)
+
+#Obtaining accuracy 
+acc[i] <- 1-misClasificError
+
+answers2<- as.numeric(answers) #converting to numeric so in correct format for RMSE function 
+
+rmse <- RMSE(results,answers2) # working out root mean square error/root mean square deviation 
+
+performances[i] <- rmse #storing RMSE value from each iteration 
+
+# saving model(s) from each iteration
+
+if (i == 1) {
+  model_x1 <- model_x
+}
+if (i == 2) {
+  model_x2 <- model_x
+}
+if (i == 3) {
+  model_x3 <- model_x
+}
+if (i == 4) {
+  model_x4 <- model_x
+}
+if (i == 5) {
+  model_x5 <- model_x
+}
+if (i == 6) {
+  model_x6 <- model_x
+}
+if (i == 7) {
+  model_x7 <- model_x
+}
+if (i == 8) {
+  model_x8 <- model_x
+}
+if (i == 9) {
+  model_x9 <- model_x
+}
+if (i == 10) {
+  model_x10 <- model_x
+}
+}
+
+mean(acc) # average accuracy during cross-validation
+
+print(acc) # checking accuracy across the 10 iterations
+
+print(performances) # checking RMSE across the 10 iterations 
+
+model_x <- model_x3 # iteration with the lowest RMSE. Lower -> Better model 
+
+#Model information 
+options(warn=-1) #getting rid of checked warning messages
+summary(model_x)
+
+# Confidence intervals 
+options(warn=-1) #getting rid of checked warning messages
+confint(model_x) 
+
+# Creating odds ratio table 
+
+options(warn=-1) #getting rid of checked warning messages
+table_model_1 <- tidy(model_x, exp= T, conf.int=T) # table with odds ratios
+
+View(table_model_1)
+
+write.csv(table_model_1, file= "table_model_odds_dichotomous.csv") # saving complete odds ratio table
+
+```
+
+
+```{r}
+
+# Obtaining additional tables based on descending odds ratio and statistical significance filtering
+
+ table_model_2 <- table_model_1%>% 
+arrange(desc(abs(estimate))) #arranging by descending odds ratio value
+
+View(table_model_2)
+
+write.csv(table_model_2, file= "table_model_odds_abs_dichotomous.csv") # saving table ordered on descending odds ratio value 
+
+table_model_3 <- table_model_2 %>% filter(table_model_2$p.value <=0.05) #filtering by statistical significance 
+
+View(table_model_3)
+
+write.csv(table_model_3, file= "table_model_odds_abs_pval_dichotomous.csv") #saving table ordered on descending odds ratio value and with statistical significance filtering 
+
+```
+
+
+```{r}
+# Performance on the test data
+
+# Reformatting Test variable 
+
+Comfort_Q12 <- Test #saving to new variable 
+
+# Reformatting binary variables to factors where appropriate 
+
+Comfort_Q12$Frail <- (ifelse(Comfort_Q12$Frail<0.5,0,1))
+Comfort_Q12$Charlson.Severe <- (ifelse(Comfort_Q12$Charlson.Severe<0.5,0,1))
+Comfort_Q12$Age.70.1 <- (ifelse(Comfort_Q12$Age.70.1<0.5,0,1))
+Comfort_Q12$EQ5D5L.0.6 <- (ifelse(Comfort_Q12$EQ5D5L.0.6 <0.5,0,1))
+Comfort_Q12$eGFR.60 <- (ifelse(Comfort_Q12$eGFR.60 <0.5,0,1))
+
+Test <- Comfort_Q12 # reverting back to original variable name
+
+# Making test predictions/predicting the probability of death with no appropriate therapy for each patient in the test split/set
+
+options(warn=-1) #getting rid of checked warning messages
+probabilities <- model_x %>% predict(Test, type = "response")
+probabilities
+
+# predicting the class (0 vs 1) of each patient
+# Places each patient into one of the two groups based on their predicted probabilities
+
+predicted.classes <- ifelse(probabilities > 0.55, 1, 0)
+head(predicted.classes)
+table(predicted.classes)
+
+# Assessing model accuracy
+
+mean(predicted.classes == Test$Outcome_variable)
+
+#Assessing RMSE
+
+rmse_step <- RMSE(predicted.classes,Test$Outcome_variable)
+
+# Confusion matrix to obtain model evaluation metrics 
+
+confusionMatrix(as.factor(predicted.classes), as.factor(Test$Outcome_variable))
+
+
+
+```
+
+
+```{r}
+# Area under the precision recall curve value and precision recall curve plot 
+
+fg <- predicted.classes[Test$Outcome_variable == 1] #scores.class0 -> all predictions for the positive class (death with no appropriate therapy)
+
+
+bg <- predicted.classes[Test$Outcome_variable == 0] #scores.class1 -> all predictions for the negative class (all other outcomes)
+
+pr <- pr.curve(scores.class0 = fg, scores.class1 = bg, curve = T) #obtaining AUPRC value. curve = T allows curve to be obtained
+
+plot(pr, cex.main = 1) #plotting PR curve 
+```
+
+
+```{r}
+#Area under the curve value and ROC curve plot 
+
+pred <- prediction(as.numeric(predicted.classes), as.numeric(Test$Outcome_variable))# obtaining predictions of class vs actual class
+
+
+roc = performance(pred,"tpr","fpr") #creating performance object of TPR vs FPR 
+plot(roc, colorize = T, lwd = 2, cex.main = 1) #plotting ROC curve 
+abline(a = 0, b = 1) 
+
+auc = performance(pred, measure = "auc") #creating performance object of AUC
+auc@y.values # obtaining AUC value 
+```
+
+```{r}
+# Distribution plots of all (predicted) probabilities
+
+probabilities <- as.data.frame(probabilities) #converting to dataframe so in appropriate format for ggplot 
+
+
+ggplot(probabilities, aes(x=probabilities)) + geom_density(aes(y = ..count..), fill = "lightgray") + geom_vline(aes(xintercept = mean(probabilities)), linetype = "dashed", size = 0.6) #plotting distribution of probabilities 
+```
+
+```{r}
+# Probability distributions for (predicted) probabilities of different subsets of the test split 
+
+Test_Outcome <- Test$Outcome_variable #storing actual outcome as integer 
+
+Test_Outcome <- as.data.frame(Test_Outcome) # converting to dataframe 
+
+Prob_test <-cbind(probabilities, Test_Outcome) #combining dataframes
+
+
+# Probability plot for all 26 patients who died with no appropriate therapy (TP + FN)  
+
+Prob_test_TP_FN <- filter(Prob_test, Prob_test$Test_Outcome == "1") # obtaining only TP + FN 
+
+Prob_test_TP_FN <- Prob_test_TP_FN[-c(2)] #removing outcome variable column so only contains probabilities 
+
+ggplot(Prob_test_TP_FN, aes(x=probabilities)) + geom_density(aes(y = ..count..), fill = "lightgray") + geom_vline(aes(xintercept = mean(probabilities)), linetype = "dashed", size = 0.6) 
+mean(Prob_test_TP_FN$probabilities) #mean probability
+
+# Probability plot for all 305 patients who didn't die with no appropriate therapy (TN + FP)
+
+Prob_test_TN_FP <- filter(Prob_test, Prob_test$Test_Outcome == "0") # obtaining all TN + FP
+
+Prob_test_TN_FP <- Prob_test_TN_FP[-c(2)] #removing outcome variable column so only contains probabilities 
+
+ggplot(Prob_test_TN_FP, aes(x=probabilities)) + geom_density(aes(y = ..count..), fill = "lightgray") + geom_vline(aes(xintercept = mean(probabilities)), linetype = "dashed", size = 0.6) 
+mean(Prob_test_TN_FP$probabilities) # mean probability 
+
+```
+
+
+
+
